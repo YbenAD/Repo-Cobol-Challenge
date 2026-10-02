@@ -1,0 +1,176 @@
+name: Nightly build
+
+# Quand ce pipeline se declenche :
+#   - tous les jours a 2h00 UTC ("nightly build" demande par le challenge)
+#   - a chaque push ou pull request, pour avoir un retour immediat
+#   - manuellement depuis l'onglet "Actions" de GitHub (workflow_dispatch)
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1) Compile les 3 programmes COBOL avec GnuCOBOL (compilateur libre).
+  #    Ca ne remplace pas une vraie compilation IGYWCL sur le mainframe,
+  #    mais ca attrape immediatement les erreurs de syntaxe/structure
+  #    (DIVISION manquante, variable non declaree, PERFORM invalide,
+  #    etc.) sans attendre d'avoir la main sur le z/OS.
+  # ---------------------------------------------------------------------
+  cobol-build:
+    name: Compilation COBOL (GnuCOBOL)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      - name: Installer GnuCOBOL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnucobol
+
+      - name: Verifier la syntaxe de chaque programme
+        run: |
+          set -e
+          for f in cobol/CLMLOAD.cbl cobol/CLMREAD.cbl cobol/CLMRPT.cbl; do
+            echo "::group::Syntax-only $f"
+            cobc -std=ibm -fsyntax-only -Icopybooks "$f"
+            echo "::endgroup::"
+          done
+
+      - name: Compiler et lier (CLMLOAD seul, CLMRPT+CLMREAD ensemble)
+        run: |
+          set -e
+          mkdir -p build
+          cp cobol/*.cbl copybooks/*.cpy build/
+          cd build
+          echo "::group::cobc -x CLMLOAD.cbl"
+          cobc -std=ibm -x CLMLOAD.cbl
+          echo "::endgroup::"
+          echo "::group::cobc -m CLMREAD.cbl (module appelable)"
+          cobc -std=ibm -m CLMREAD.cbl
+          echo "::endgroup::"
+          echo "::group::cobc -x CLMRPT.cbl CLMREAD.cbl"
+          cobc -std=ibm -x CLMRPT.cbl CLMREAD.cbl
+          echo "::endgroup::"
+          ls -la CLMLOAD CLMRPT CLMREAD.so
+
+      - name: Publier les binaires compiles (pour inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobol-build-${{ github.run_number }}
+          path: |
+            build/CLMLOAD
+            build/CLMRPT
+            build/CLMREAD.so
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # 2) Verifie que le JCL respecte les regles de base du format (colonnes
+  #    1-72 utilisables, pas de tabulations, present des cartes
+  #    obligatoires). Ca n'execute pas le JCL (il faudrait un vrai z/OS
+  #    et des identifiants mainframe en secret), mais ca attrape les
+  #    erreurs de mise en forme les plus frequentes avant de les copier
+  #    sur Z87663.JCL.
+  # ---------------------------------------------------------------------
+  jcl-lint:
+    name: Verification du format JCL
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      - name: Controler longueur de ligne et tabulations
+        run: |
+          set -e
+          fail=0
+          for f in jcl/*.jcl app/jcl/*.jcl; do
+            echo "Verification de $f"
+            if grep -Pn '\t' "$f"; then
+              echo "::error file=$f::Tabulation trouvee (interdite en JCL, utiliser des espaces)"
+              fail=1
+            fi
+            awk -v f="$f" 'length($0) > 80 { printf "::error file=%s,line=%d::Ligne de %d caracteres (> 80)\n", f, NR, length($0); err=1 } END { exit err }' "$f" || fail=1
+          done
+          exit $fail
+
+      - name: Controler la presence de la carte JOB
+        run: |
+          set -e
+          fail=0
+          for f in jcl/*.jcl app/jcl/*.jcl; do
+            if ! grep -qE '^//[A-Z0-9]+ +JOB ' "$f"; then
+              echo "::error file=$f::Aucune carte JOB trouvee en premiere ligne"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # ---------------------------------------------------------------------
+  # 3) Verifie que l'application Node.js (point 5, optionnel) s'installe
+  #    et que ses fichiers sont au moins syntaxiquement valides.
+  # ---------------------------------------------------------------------
+  node-app-build:
+    name: Build de l'application web (Node.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Installer les dependances
+        run: npm install
+
+      - name: Verifier la syntaxe de server.js
+        run: node --check server.js
+
+      - name: Verifier que le gabarit JCL contient bien le marqueur {{REQUEST}}
+        run: |
+          grep -q '{{REQUEST}}' jcl/RUNRPT.template.jcl
+
+  # ---------------------------------------------------------------------
+  # 4) Recapitulatif : ce job ne fait rien de plus, il sert juste a avoir
+  #    un seul "check" obligatoire a brancher sur la protection de la
+  #    branche main (Settings > Branches > Require status checks).
+  # ---------------------------------------------------------------------
+  nightly-build-summary:
+    name: Resume du nightly build
+    runs-on: ubuntu-latest
+    needs: [ cobol-build, jcl-lint, node-app-build ]
+    if: always()
+    steps:
+      - name: Statut global
+        run: |
+          echo "cobol-build:     ${{ needs.cobol-build.result }}"
+          echo "jcl-lint:        ${{ needs.jcl-lint.result }}"
+          echo "node-app-build:  ${{ needs.node-app-build.result }}"
+          if [ "${{ needs.cobol-build.result }}" != "success" ] || \
+             [ "${{ needs.jcl-lint.result }}" != "success" ] || \
+             [ "${{ needs.node-app-build.result }}" != "success" ]; then
+            echo "::error::Un ou plusieurs jobs du nightly build ont echoue."
+            exit 1
+          fi
+          echo "Nightly build OK."
+
+# ---------------------------------------------------------------------------
+# Pour aller plus loin (facultatif, non active ici car il faudrait stocker
+# des identifiants mainframe dans les "Secrets" du depot GitHub) :
+# un job supplementaire pourrait installer le Zowe CLI, configurer un
+# profil zosmf a partir de secrets (ZOWE_HOST, ZOWE_USER, ZOWE_PASSWORD),
+# puis soumettre reellement COMPLOAD/COMPREAD/COMPRPT sur le z/OS avec
+# `zowe zos-jobs submit local-file ... --wait-for-output --rfj` pour
+# valider la compilation IGYWCL reelle, et non plus seulement GnuCOBOL.
+# ---------------------------------------------------------------------------

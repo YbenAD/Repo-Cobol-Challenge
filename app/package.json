@@ -1,0 +1,12 @@
+{
+  "name": "unemployment-claims-app",
+  "version": "1.0.0",
+  "description": "Appli web (point 5, optionnel) du challenge COBOL - recherche un Record-ID via Zowe CLI / z/OSMF",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

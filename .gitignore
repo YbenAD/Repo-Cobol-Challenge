@@ -1,0 +1,17 @@
+# Node.js (app/)
+node_modules/
+npm-debug.log*
+.env
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Artefacts de compilation COBOL locaux (GnuCOBOL), si jamais generes ici
+*.o
+*.so
+*.obj
+*.dyn
+*.lst
+cobtest/

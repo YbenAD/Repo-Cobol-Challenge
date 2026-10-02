@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unemployment Claims - Missouri</title>
+<style>
+  :root {
+    --blue: #1565c0;
+    --blue-dark: #0d47a1;
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e0e4e8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .phone {
+    width: 100%;
+    max-width: 480px;
+  }
+  h1 {
+    font-size: 20px;
+    color: var(--blue-dark);
+    margin: 0 0 20px;
+    text-align: center;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  input[type=text] {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 14px;
+  }
+  .row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  button {
+    flex: 1;
+    padding: 12px 14px;
+    font-size: 15px;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .btn-primary {
+    background: var(--blue);
+    color: white;
+  }
+  .btn-primary:hover { background: var(--blue-dark); }
+  .btn-secondary {
+    background: #eef2f6;
+    color: var(--text);
+  }
+  .btn-secondary:hover { background: #e2e8f0; }
+  button:disabled { opacity: 0.6; cursor: wait; }
+
+  #results-view { display: none; }
+  .back-link {
+    background: none;
+    border: none;
+    color: var(--blue);
+    font-weight: 600;
+    padding: 0 0 14px 0;
+    cursor: pointer;
+    flex: none;
+    font-size: 14px;
+  }
+  .job-meta {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .status-ok { color: #15803d; }
+  .status-warn { color: #b45309; }
+  pre.report {
+    background: #0d1117;
+    color: #d1d5db;
+    padding: 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre;
+  }
+  .error-box {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    margin-bottom: 14px;
+  }
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="phone">
+  <h1>Missouri Unemployment Claims</h1>
+
+  <div id="search-view" class="card">
+    <label for="record-id">Record ID (MMJJAAAA) ou "ALL" pour tous les mois</label>
+    <input type="text" id="record-id" placeholder="ex: 08012012 ou ALL" maxlength="8">
+    <div class="row">
+      <button id="btn-submit" class="btn-primary">Rechercher</button>
+    </div>
+    <div class="hint">
+      Chaque recherche soumet un job JCL sur le mainframe via le Zowe
+      CLI et attend sa fin : ca peut prendre quelques secondes.
+    </div>
+  </div>
+
+  <div id="results-view">
+    <button class="back-link" id="btn-back">&larr; Nouvelle recherche</button>
+    <div class="card">
+      <div id="job-meta" class="job-meta"></div>
+      <div id="error-box" class="error-box" style="display:none;"></div>
+      <pre id="report" class="report"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+const searchView = document.getElementById('search-view');
+const resultsView = document.getElementById('results-view');
+const input = document.getElementById('record-id');
+const btnSubmit = document.getElementById('btn-submit');
+const btnBack = document.getElementById('btn-back');
+const jobMeta = document.getElementById('job-meta');
+const errorBox = document.getElementById('error-box');
+const reportEl = document.getElementById('report');
+
+function showResults() {
+  searchView.style.display = 'none';
+  resultsView.style.display = 'block';
+}
+function showSearch() {
+  resultsView.style.display = 'none';
+  searchView.style.display = 'block';
+  input.focus();
+}
+
+btnBack.addEventListener('click', showSearch);
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') btnSubmit.click();
+});
+
+btnSubmit.addEventListener('click', async () => {
+  const recordId = input.value.trim();
+  if (!recordId) return;
+
+  btnSubmit.disabled = true;
+  btnSubmit.textContent = 'Soumission du job...';
+  errorBox.style.display = 'none';
+  reportEl.textContent = '';
+  jobMeta.textContent = '';
+
+  try {
+    const resp = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recordId })
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      errorBox.style.display = 'block';
+      let msg = data.error || 'Erreur inconnue';
+      if (data.detail) msg += ' - ' + data.detail;
+      errorBox.textContent = msg;
+
+      const debugLines = [];
+      if (data.jobid) debugLines.push('jobid: ' + data.jobid);
+      if (data.jobStatus) debugLines.push('statut job: ' + data.jobStatus);
+      if (data.retcode) debugLines.push('retcode: ' + data.retcode);
+      if (data.availableDDs) {
+        debugLines.push('DD disponibles dans le spool: ' +
+          data.availableDDs.join(', '));
+      }
+      jobMeta.textContent = debugLines.join('  |  ');
+      reportEl.textContent = '';
+      showResults();
+      return;
+    }
+
+    const statusClass = (data.retcode === 'CC 0000' || data.retcode === 'CC 0004')
+      ? 'status-ok' : 'status-warn';
+    jobMeta.innerHTML =
+      'Job ' + data.jobname + ' (' + data.jobid + ') - statut ' +
+      data.status + ' - <span class="' + statusClass + '">' +
+      data.retcode + '</span>';
+    reportEl.textContent = data.report;
+    showResults();
+  } catch (err) {
+    errorBox.style.display = 'block';
+    errorBox.textContent = 'Erreur reseau : ' + err.message;
+    showResults();
+  } finally {
+    btnSubmit.disabled = false;
+    btnSubmit.textContent = 'Rechercher';
+  }
+});
+</script>
+</body>
+</html>
