@@ -4,8 +4,15 @@
       * CLMREAD - sous-programme d'acces au VSAM CLAIMS
       * Appel   : CALL 'CLMREAD' USING CLM-REQUEST CLM-RECORD
       * DDNAME  : CLAIMIN (le cluster Z87663.CLAIMS.VSAM)
-      * Le fichier est ouvert au premier appel et reste ouvert
-      * entre les appels jusqu'a la fonction C (fermeture).
+      * Le fichier est ouvert EN I-O des le premier appel (lecture ET
+      * ecriture) et reste ouvert entre les appels jusqu'a la fonction
+      * C (fermeture).
+      *
+      * Fonctions supportees (voir CLMLINK.cpy pour le detail) :
+      *   R lecture par cle      F 1er enregistrement
+      *   N enregistrement suivant
+      *   I insertion            U mise a jour       D suppression
+      *   C fermeture
       ******************************************************************
        ENVIRONMENT DIVISION.
        INPUT-OUTPUT SECTION.
@@ -47,6 +54,12 @@
                     PERFORM 3000-READ-FIRST
                  WHEN CLM-FUNC-NEXT
                     PERFORM 4000-READ-NEXT
+                 WHEN CLM-FUNC-INSERT
+                    PERFORM 5000-INSERT-RECORD
+                 WHEN CLM-FUNC-UPDATE
+                    PERFORM 6000-UPDATE-RECORD
+                 WHEN CLM-FUNC-DELETE
+                    PERFORM 7000-DELETE-RECORD
                  WHEN CLM-FUNC-CLOSE
                     PERFORM 9000-CLOSE
                  WHEN OTHER
@@ -56,10 +69,12 @@
            GOBACK.
 
       *---------------------------------------------------------------*
-      * Ouverture du VSAM (au premier appel seulement)                *
+      * Ouverture du VSAM en I-O (au premier appel seulement).        *
+      * I-O permet a la fois la lecture (R/F/N) et les fonctions      *
+      * d'ecriture (I/U/D) avec le meme sous-programme.               *
       *---------------------------------------------------------------*
        1000-OPEN.
-           OPEN INPUT CLAIMS-VSAM
+           OPEN I-O CLAIMS-VSAM
            MOVE WS-VSAM-FS TO CLM-VSAM-STATUS
            IF WS-VSAM-FS = '00'
               SET FILE-IS-OPEN TO TRUE
@@ -114,6 +129,61 @@
                  CONTINUE
               WHEN '10'
                  MOVE '08' TO CLM-RETURN-CODE
+              WHEN OTHER
+                 MOVE '12' TO CLM-RETURN-CODE
+           END-EVALUATE.
+
+      *---------------------------------------------------------------*
+      * I : insertion d'un nouvel enregistrement                      *
+      * L'appelant doit avoir rempli CLM-RECORD en entree (la cle     *
+      * inseree est CLM-RECORD-ID). RC '20' si la cle existe deja     *
+      * (status VSAM 22 = cle en double).                             *
+      *---------------------------------------------------------------*
+       5000-INSERT-RECORD.
+           WRITE VSAM-REC FROM CLM-RECORD
+           MOVE WS-VSAM-FS TO CLM-VSAM-STATUS
+           EVALUATE WS-VSAM-FS
+              WHEN '00'
+                 CONTINUE
+              WHEN '22'
+                 MOVE '20' TO CLM-RETURN-CODE
+              WHEN OTHER
+                 MOVE '12' TO CLM-RETURN-CODE
+           END-EVALUATE.
+
+      *---------------------------------------------------------------*
+      * U : mise a jour d'un enregistrement existant                  *
+      * L'appelant doit fournir l'enregistrement COMPLET (en general  *
+      * relu puis modifie) dans CLM-RECORD ; CLM-RECORD-ID porte la   *
+      * cle a mettre a jour. En acces DYNAMIC sur fichier indexe      *
+      * ouvert en I-O, REWRITE n'exige pas de READ prealable : il     *
+      * suffit de positionner la cle avant l'ecriture.                *
+      *---------------------------------------------------------------*
+       6000-UPDATE-RECORD.
+           MOVE CLM-RECORD-ID TO VSAM-KEY
+           REWRITE VSAM-REC FROM CLM-RECORD
+           MOVE WS-VSAM-FS TO CLM-VSAM-STATUS
+           EVALUATE WS-VSAM-FS
+              WHEN '00'
+                 CONTINUE
+              WHEN '23'
+                 MOVE '04' TO CLM-RETURN-CODE
+              WHEN OTHER
+                 MOVE '12' TO CLM-RETURN-CODE
+           END-EVALUATE.
+
+      *---------------------------------------------------------------*
+      * D : suppression de l'enregistrement de cle CLM-REQ-KEY        *
+      *---------------------------------------------------------------*
+       7000-DELETE-RECORD.
+           MOVE CLM-REQ-KEY TO VSAM-KEY
+           DELETE CLAIMS-VSAM RECORD
+           MOVE WS-VSAM-FS TO CLM-VSAM-STATUS
+           EVALUATE WS-VSAM-FS
+              WHEN '00'
+                 CONTINUE
+              WHEN '23'
+                 MOVE '04' TO CLM-RETURN-CODE
               WHEN OTHER
                  MOVE '12' TO CLM-RETURN-CODE
            END-EVALUATE.

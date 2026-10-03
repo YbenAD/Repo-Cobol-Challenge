@@ -3,16 +3,21 @@
 /**
  * Serveur Node.js (point 5 - optionnel - du challenge COBOL).
  *
- * Flux :
- *   1. Le navigateur poste un Record-ID (ou "ALL") sur /api/search.
- *   2. On fabrique un JCL temporaire a partir de jcl/RUNRPT.template.jcl
- *      en remplacant {{REQUEST}} par la demande.
+ * Deux usages, meme mecanique de soumission (voir submitJclTemplate) :
+ *   - /api/search   pilote CLMRPT (lecture seule) via RUNRPT.template.jcl
+ *   - /api/maintain pilote CLMMAINT (insert/update/delete, point 9.3.4)
+ *                   via RUNMAINT.template.jcl
+ *
+ * Flux commun :
+ *   1. Le navigateur poste une demande (recherche ou maintenance).
+ *   2. On fabrique un JCL temporaire a partir du gabarit correspondant
+ *      en remplacant {{REQUEST}} par la ligne SYSIN construite.
  *   3. On soumet ce JCL avec le Zowe CLI deja installe/configure sur
  *      cette machine (`zowe zos-jobs submit local-file ... --wfo --rfj`),
  *      ce qui attend la fin du job et renvoie son statut en JSON.
  *   4. On liste les fichiers spool du job (`zowe zos-jobs list
  *      spool-files-by-jobid`) pour trouver celui nomme SYSOUT (c'est la
- *      DD ou CLMRPT ecrit son rapport via DISPLAY).
+ *      DD ou CLMRPT/CLMMAINT ecrivent leur sortie via DISPLAY).
  *   5. On recupere son contenu texte (`zowe zos-jobs view
  *      spool-file-by-id`) et on le renvoie au navigateur.
  *
@@ -34,7 +39,8 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const PORT = process.env.PORT || 3000;
-const TEMPLATE_PATH = path.join(__dirname, 'jcl', 'RUNRPT.template.jcl');
+const TEMPLATE_PATH_RPT = path.join(__dirname, 'jcl', 'RUNRPT.template.jcl');
+const TEMPLATE_PATH_MAINT = path.join(__dirname, 'jcl', 'RUNMAINT.template.jcl');
 const ZOWE_TIMEOUT_MS = 2 * 60 * 1000; // le job + les 3 commandes zowe
 
 const ZOWE_BIN = 'zowe';
@@ -67,6 +73,57 @@ function validateRequest(raw) {
   return null;
 }
 
+/**
+ * Construit et valide la ligne SYSIN d'une demande de maintenance
+ * pour CLMMAINT (voir cobol/CLMMAINT.cbl et app/jcl/RUNMAINT.template.jcl)
+ * a partir du corps JSON envoye par le formulaire. Renvoie soit
+ * { line } soit { error } - jamais les deux.
+ *
+ * Format attendu par CLMMAINT, separe par des virgules :
+ *   I,RECORD-ID,DATE,SEX-INA,SEX-FEMALE,SEX-MALE
+ *   U,RECORD-ID,DATE,SEX-INA,SEX-FEMALE,SEX-MALE
+ *   D,RECORD-ID
+ *
+ * Chaque champ est valide ici cote serveur avant d'etre insere dans
+ * le texte du JCL soumis sur le mainframe (meme logique de defense
+ * que validateRequest() pour /api/search).
+ */
+function buildMaintenanceLine(body) {
+  const func = String((body && body.function) || '').trim().toUpperCase();
+  if (!['I', 'U', 'D'].includes(func)) {
+    return { error: 'Fonction invalide : attendu I (insertion), U (modification) ou D (suppression).' };
+  }
+
+  const recordId = String((body && body.recordId) || '').trim();
+  if (!/^[0-9]{8}$/.test(recordId)) {
+    return { error: 'Record-ID invalide : attendu exactement 8 chiffres (ex 08012012).' };
+  }
+
+  if (func === 'D') {
+    return { line: `D,${recordId}` };
+  }
+
+  const date = String((body && body.date) || '').trim();
+  if (!/^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$/.test(date)) {
+    return { error: 'Date invalide : attendu le format MM/JJ/AAAA (ex 08/01/2012).' };
+  }
+
+  const sexFields = ['sexIna', 'sexFemale', 'sexMale'];
+  const sexValues = [];
+  for (const field of sexFields) {
+    const raw = String((body && body[field]) || '').trim();
+    if (!/^[0-9]{1,7}$/.test(raw)) {
+      return {
+        error: 'Valeurs SEX invalides : attendu un nombre entier (0 a 9999999) ' +
+          'pour chacun des 3 champs (Non renseigne / Femmes / Hommes).'
+      };
+    }
+    sexValues.push(String(Number(raw)));
+  }
+
+  return { line: `${func},${recordId},${date},${sexValues.join(',')}` };
+}
+
 /** Execute une commande zowe et parse sa sortie JSON (--rfj). */
 async function runZoweJson(args) {
   const { stdout } = await execFileAsync(ZOWE_BIN, args, {
@@ -87,31 +144,38 @@ async function runZoweText(args) {
   return stdout;
 }
 
-app.post('/api/search', async (req, res) => {
-  const request = validateRequest(req.body && req.body.recordId);
-  if (!request) {
-    return res.status(400).json({
-      error: "Record-ID invalide : attendu 8 chiffres (ex 08012012) ou \"ALL\"."
-    });
-  }
-
-  const tmpFile = path.join(
-    os.tmpdir(),
-    `runrpt-${crypto.randomUUID()}.jcl`
-  );
+/**
+ * Mecanique commune aux deux usages de l'appli : construit un JCL a
+ * partir d'un gabarit + d'une ligne SYSIN, le soumet avec le Zowe CLI,
+ * attend la fin du job et renvoie le contenu de sa DD SYSOUT.
+ *
+ * - templatePath : jcl/RUNRPT.template.jcl ou jcl/RUNMAINT.template.jcl
+ * - requestLine  : la ou les lignes a inserer a la place de {{REQUEST}}
+ * - tmpPrefix    : prefixe du fichier JCL temporaire (pour le distinguer
+ *                  dans le dossier temp en cas de probleme)
+ *
+ * Renvoie { status, body } directement exploitable par res.status().json()
+ * cote appelant, pour garder la meme forme de reponse qu'avant ce
+ * refactoring (succes -> 200, divers echecs -> 400/500/502).
+ */
+async function submitJclTemplate(templatePath, requestLine, tmpPrefix) {
+  const tmpFile = path.join(os.tmpdir(), `${tmpPrefix}-${crypto.randomUUID()}.jcl`);
 
   try {
-    // 1. Construit le JCL a partir du template
-    const template = await fs.readFile(TEMPLATE_PATH, 'utf8');
+    // 1. Construit le JCL a partir du gabarit
+    const template = await fs.readFile(templatePath, 'utf8');
     if (!template.includes('{{REQUEST}}')) {
-      return res.status(500).json({
-        error: 'Le fichier jcl/RUNRPT.template.jcl ne contient pas le ' +
-          'marqueur {{REQUEST}} - re-telecharge le fichier fourni ' +
-          'et remplace-le entierement (ne pas l\'editer a la main).',
-        templatePath: TEMPLATE_PATH
-      });
+      return {
+        status: 500,
+        body: {
+          error: `Le fichier ${path.basename(templatePath)} ne contient pas ` +
+            'le marqueur {{REQUEST}} - re-telecharge le fichier fourni et ' +
+            'remplace-le entierement (ne pas l\'editer a la main).',
+          templatePath
+        }
+      };
     }
-    const jcl = template.replaceAll('{{REQUEST}}', request);
+    const jcl = template.replaceAll('{{REQUEST}}', requestLine);
     console.log('----- JCL soumis -----\n' + jcl + '\n-----------------------');
     await fs.writeFile(tmpFile, jcl, 'utf8');
 
@@ -121,10 +185,10 @@ app.post('/api/search', async (req, res) => {
       '--wait-for-output', '--rfj'
     ]);
     if (!submitResult.success) {
-      return res.status(502).json({
-        error: 'Echec de soumission du job',
-        detail: submitResult.message || submitResult
-      });
+      return {
+        status: 502,
+        body: { error: 'Echec de soumission du job', detail: submitResult.message || submitResult }
+      };
     }
     const job = submitResult.data;
     const jobid = job.jobid;
@@ -141,13 +205,16 @@ app.post('/api/search', async (req, res) => {
       (f) => String(f.ddname).toUpperCase() === 'SYSOUT'
     );
     if (!sysoutFile) {
-      return res.status(502).json({
-        error: 'DD SYSOUT introuvable dans le spool du job',
-        jobid,
-        jobStatus: job.status,
-        retcode: job.retcode,
-        availableDDs: spoolFiles.map((f) => f.ddname)
-      });
+      return {
+        status: 502,
+        body: {
+          error: 'DD SYSOUT introuvable dans le spool du job',
+          jobid,
+          jobStatus: job.status,
+          retcode: job.retcode,
+          availableDDs: spoolFiles.map((f) => f.ddname)
+        }
+      };
     }
 
     // 4. Recupere le contenu du rapport
@@ -155,21 +222,40 @@ app.post('/api/search', async (req, res) => {
       'zos-jobs', 'view', 'spool-file-by-id', jobid, String(sysoutFile.id)
     ]);
 
-    return res.json({
-      jobid,
-      jobname: job.jobname,
-      retcode: job.retcode,
-      status: job.status,
-      report
-    });
+    return {
+      status: 200,
+      body: { jobid, jobname: job.jobname, retcode: job.retcode, status: job.status, report }
+    };
   } catch (err) {
-    return res.status(500).json({
-      error: 'Erreur lors de l\'appel au Zowe CLI',
-      detail: err.stderr ? err.stderr.toString() : err.message
-    });
+    return {
+      status: 500,
+      body: { error: 'Erreur lors de l\'appel au Zowe CLI', detail: err.stderr ? err.stderr.toString() : err.message }
+    };
   } finally {
     await fs.unlink(tmpFile).catch(() => {});
   }
+}
+
+app.post('/api/search', async (req, res) => {
+  const request = validateRequest(req.body && req.body.recordId);
+  if (!request) {
+    return res.status(400).json({
+      error: "Record-ID invalide : attendu 8 chiffres (ex 08012012) ou \"ALL\"."
+    });
+  }
+
+  const { status, body } = await submitJclTemplate(TEMPLATE_PATH_RPT, request, 'runrpt');
+  return res.status(status).json(body);
+});
+
+app.post('/api/maintain', async (req, res) => {
+  const { line, error } = buildMaintenanceLine(req.body);
+  if (error) {
+    return res.status(400).json({ error });
+  }
+
+  const { status, body } = await submitJclTemplate(TEMPLATE_PATH_MAINT, line, 'runmaint');
+  return res.status(status).json(body);
 });
 
 app.listen(PORT, () => {

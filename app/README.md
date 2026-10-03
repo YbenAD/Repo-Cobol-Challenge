@@ -1,43 +1,68 @@
 # Unemployment Claims - Application Web (point 5, optionnel)
 
-Petite application Node.js / Express qui permet de rechercher un
-enregistrement de chomage du Missouri (ou tous les enregistrements) sans
-passer par l'ecran vert, en pilotant le mainframe z/OS a travers le
-**Zowe CLI**.
+Petite application Node.js / Express avec deux onglets :
+- **Recherche** : lire un enregistrement de chomage du Missouri (ou tous
+  les enregistrements), sans passer par l'ecran vert.
+- **Maintenance** (point 9.3.4, optionnel) : inserer, modifier ou
+  supprimer un enregistrement.
+
+Les deux pilotent le mainframe z/OS a travers le **Zowe CLI**.
 
 Elle fait partie du challenge COBOL "9.3 - The Unemployment Claims" :
 1. `CLMLOAD` charge les 5 CSV dans le VSAM `Z87663.CLAIMS.VSAM`.
 2. `CLMREAD` est le sous-programme d'acces au VSAM (lecture par cle ou
-   sequentielle).
+   sequentielle, plus insertion/mise a jour/suppression - point 9.3.4).
 3. `CLMRPT` est le programme de rapport qui appelle `CLMREAD`.
-4. Cette application web est le point optionnel : au lieu de lancer le JCL
-   `RUNRPT` a la main dans Zowe Explorer, on tape un Record-ID dans un
-   formulaire, et le serveur soumet un job equivalent pour nous.
+4. `CLMMAINT` est le programme de maintenance qui appelle lui aussi
+   `CLMREAD` pour inserer/modifier/supprimer un enregistrement.
+5. Cette application web est le point optionnel : au lieu de lancer les
+   JCL `RUNRPT`/`RUNMAINT` a la main dans Zowe Explorer, on remplit un
+   formulaire et le serveur soumet un job equivalent pour nous.
 
 ## Comment ca marche
 
 ```
-Navigateur --POST /api/search--> server.js --Zowe CLI--> z/OSMF --> JES (job RUNRPT)
+Navigateur --POST /api/search----> server.js --Zowe CLI--> z/OSMF --> JES (CLMRPT)
+Navigateur --POST /api/maintain--> server.js --Zowe CLI--> z/OSMF --> JES (CLMMAINT)
 ```
 
-1. Le navigateur envoie `{ recordId: "08012012" }` (ou `"ALL"`) a
-   `/api/search`.
-2. `server.js` valide la valeur (8 chiffres ou `ALL` uniquement - elle est
-   inseree telle quelle dans un JCL, donc on filtre strictement).
-3. Il part du gabarit `jcl/RUNRPT.template.jcl`, remplace le marqueur
-   `{{REQUEST}}` par la valeur demandee, et ecrit une copie temporaire.
+Les deux routes partagent la meme mecanique de soumission
+(`submitJclTemplate` dans `server.js`), seuls le gabarit JCL et la ligne
+SYSIN construite different :
+
+1. Le navigateur poste sa demande :
+   - `/api/search` : `{ recordId: "08012012" }` (ou `"ALL"`).
+   - `/api/maintain` : `{ function: "I"|"U"|"D", recordId, date,
+     sexIna, sexFemale, sexMale }` (`date` et les 3 valeurs `sex*` sont
+     ignores/optionnels pour une suppression).
+2. `server.js` valide strictement chaque champ (le Record-ID doit faire
+   exactement 8 chiffres, la fonction doit etre I/U/D, les valeurs SEX
+   doivent etre des entiers 0-9999999, etc.) - ces valeurs sont inserees
+   telles quelles dans un JCL, donc la validation cote serveur est la
+   premiere ligne de defense.
+3. Il part du gabarit correspondant (`jcl/RUNRPT.template.jcl` ou
+   `jcl/RUNMAINT.template.jcl`), remplace le marqueur `{{REQUEST}}` par
+   la ligne construite (ex: `I,09152026,09/15/2026,10,1500,2000`), et
+   ecrit une copie temporaire.
 4. Il soumet cette copie avec :
    `zowe zos-jobs submit local-file <fichier> --wait-for-output --rfj`
    (`--wait-for-output` bloque jusqu'a la fin du job ; `--rfj` renvoie du
    JSON exploitable).
 5. Il liste les fichiers spool du job
    (`zowe zos-jobs list spool-files-by-jobid <jobid> --rfj`) pour trouver
-   celui dont le `ddname` est `SYSOUT` (c'est la DD ou `CLMRPT` ecrit son
-   rapport via `DISPLAY`).
+   celui dont le `ddname` est `SYSOUT` (c'est la DD ou `CLMRPT`/`CLMMAINT`
+   ecrivent leur sortie via `DISPLAY`).
 6. Il recupere son contenu texte
    (`zowe zos-jobs view spool-file-by-id <jobid> <id>`) et le renvoie au
    navigateur avec le statut du job (`status`, `retcode` au format
    `CC nnnn`).
+
+Pour la maintenance, seule la dimension SEX est saisissable depuis le
+formulaire (pour rester simple) : une insertion met les dimensions
+AGE/ETHNICITY/INDUSTRY/RACE a 0, et une modification les laisse
+inchangees (CLMMAINT relit d'abord l'enregistrement existant). Voir
+`cobol/CLMMAINT.cbl` pour le detail du format SYSIN si tu veux piloter
+davantage de champs.
 
 Aucune donnee n'est stockee cote serveur : chaque recherche est un aller-
 retour complet vers le mainframe.
@@ -57,7 +82,9 @@ retour complet vers le mainframe.
 
 - Sur le mainframe, les membres suivants doivent deja exister et avoir ete
   compiles avec succes :
-  - `Z87663.LOAD(CLMLOAD)`, `Z87663.LOAD(CLMREAD)`, `Z87663.LOAD(CLMRPT)`
+  - `Z87663.LOAD(CLMLOAD)`, `Z87663.LOAD(CLMREAD)`, `Z87663.LOAD(CLMRPT)`,
+    `Z87663.LOAD(CLMMAINT)` (uniquement necessaire pour l'onglet
+    Maintenance)
   - Le cluster VSAM `Z87663.CLAIMS.VSAM` doit avoir ete charge (job
     `RUNLOAD`) au moins une fois.
 
@@ -85,6 +112,8 @@ PORT=3001 npm start
 
 ## Utilisation
 
+### Onglet Recherche
+
 1. Entrer un Record-ID au format `MMJJAAAA` (ex. `08012012` pour aout
    2012), ou taper `ALL` pour obtenir le tableau recapitulatif de tous les
    enregistrements charges.
@@ -92,6 +121,19 @@ PORT=3001 npm start
    mainframe prend generalement quelques secondes.
 3. Le rapport (identique a ce que `CLMRPT` afficherait en SYSOUT dans
    Zowe Explorer) s'affiche tel quel.
+
+### Onglet Maintenance (point 9.3.4)
+
+1. Choisir l'operation (**Insertion**, **Modification** ou
+   **Suppression**) et entrer le Record-ID.
+2. Pour une insertion ou une modification, remplir la Date et les 3
+   valeurs SEX (Non renseigne / Femmes / Hommes).
+3. Cliquer sur **Executer**. Le resultat (identique a ce que `CLMMAINT`
+   afficherait en SYSOUT) s'affiche tel quel, avec le bilan
+   "X OK / Y EN ERREUR".
+
+La suppression est definitive : un avertissement s'affiche dans le
+formulaire avant d'executer.
 
 ## Securite / limites volontaires
 

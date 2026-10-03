@@ -34,6 +34,27 @@
     margin: 0 0 20px;
     text-align: center;
   }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .tab-btn {
+    flex: 1;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .tab-btn.active {
+    background: var(--blue);
+    color: white;
+    border-color: var(--blue);
+  }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -47,14 +68,22 @@
     color: var(--muted);
     margin-bottom: 6px;
   }
-  input[type=text] {
+  input[type=text], select {
     width: 100%;
     padding: 12px 14px;
     font-size: 16px;
     border: 1px solid var(--border);
     border-radius: 8px;
     margin-bottom: 14px;
+    background: white;
+    color: var(--text);
+    font-family: inherit;
   }
+  .field-row {
+    display: flex;
+    gap: 10px;
+  }
+  .field-row > div { flex: 1; }
   .row {
     display: flex;
     gap: 10px;
@@ -81,7 +110,9 @@
   .btn-secondary:hover { background: #e2e8f0; }
   button:disabled { opacity: 0.6; cursor: wait; }
 
-  #results-view { display: none; }
+  #search-view, #maintain-view, #results-view { display: none; }
+  #search-view.visible, #maintain-view.visible, #results-view.visible { display: block; }
+
   .back-link {
     background: none;
     border: none;
@@ -123,26 +154,91 @@
     color: var(--muted);
     margin-top: 10px;
   }
+  .warn-box {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    margin-bottom: 14px;
+  }
 </style>
 </head>
 <body>
 <div class="phone">
   <h1>Missouri Unemployment Claims</h1>
 
-  <div id="search-view" class="card">
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-search">Recherche</button>
+    <button class="tab-btn" id="tab-maintain">Maintenance</button>
+  </div>
+
+  <div id="search-view" class="card visible">
     <label for="record-id">Record ID (MMJJAAAA) ou "ALL" pour tous les mois</label>
     <input type="text" id="record-id" placeholder="ex: 08012012 ou ALL" maxlength="8">
     <div class="row">
       <button id="btn-submit" class="btn-primary">Rechercher</button>
     </div>
     <div class="hint">
-      Chaque recherche soumet un job JCL sur le mainframe via le Zowe
-      CLI et attend sa fin : ca peut prendre quelques secondes.
+      Chaque recherche soumet un job JCL (CLMRPT, lecture seule) sur le
+      mainframe via le Zowe CLI et attend sa fin : ca peut prendre
+      quelques secondes.
+    </div>
+  </div>
+
+  <div id="maintain-view" class="card">
+    <label for="maint-function">Operation</label>
+    <select id="maint-function">
+      <option value="I">Insertion (nouvel enregistrement)</option>
+      <option value="U">Modification (enregistrement existant)</option>
+      <option value="D">Suppression</option>
+    </select>
+
+    <label for="maint-record-id">Record ID (8 chiffres, MMJJAAAA)</label>
+    <input type="text" id="maint-record-id" placeholder="ex: 09152026" maxlength="8">
+
+    <div id="maint-fields-iu">
+      <label for="maint-date">Date (MM/JJ/AAAA)</label>
+      <input type="text" id="maint-date" placeholder="ex: 09/15/2026" maxlength="10">
+
+      <label>Valeurs SEX</label>
+      <div class="field-row">
+        <div>
+          <label for="maint-sex-ina">Non renseigne</label>
+          <input type="text" id="maint-sex-ina" placeholder="0" maxlength="7">
+        </div>
+        <div>
+          <label for="maint-sex-female">Femmes</label>
+          <input type="text" id="maint-sex-female" placeholder="0" maxlength="7">
+        </div>
+        <div>
+          <label for="maint-sex-male">Hommes</label>
+          <input type="text" id="maint-sex-male" placeholder="0" maxlength="7">
+        </div>
+      </div>
+    </div>
+
+    <div id="maint-warn-delete" class="warn-box" style="display:none;">
+      Attention : la suppression est definitive. Verifie bien le Record ID
+      avant d'executer.
+    </div>
+
+    <div class="row">
+      <button id="btn-maint-submit" class="btn-primary">Executer</button>
+    </div>
+    <div class="hint">
+      Insertion/modification : seule la dimension SEX est saisie ici (pour
+      garder le formulaire simple). Les autres dimensions
+      (AGE/ETHNICITY/INDUSTRY/RACE) restent a 0 pour une insertion, ou
+      sont conservees telles quelles pour une modification. Soumet un
+      job JCL (CLMMAINT) sur le mainframe via le Zowe CLI - voir
+      cobol/CLMMAINT.cbl pour le detail.
     </div>
   </div>
 
   <div id="results-view">
-    <button class="back-link" id="btn-back">&larr; Nouvelle recherche</button>
+    <button class="back-link" id="btn-back">&larr; Retour</button>
     <div class="card">
       <div id="job-meta" class="job-meta"></div>
       <div id="error-box" class="error-box" style="display:none;"></div>
@@ -152,26 +248,113 @@
 </div>
 
 <script>
+const tabSearch = document.getElementById('tab-search');
+const tabMaintain = document.getElementById('tab-maintain');
 const searchView = document.getElementById('search-view');
+const maintainView = document.getElementById('maintain-view');
 const resultsView = document.getElementById('results-view');
+
 const input = document.getElementById('record-id');
 const btnSubmit = document.getElementById('btn-submit');
+
+const maintFunction = document.getElementById('maint-function');
+const maintRecordId = document.getElementById('maint-record-id');
+const maintDate = document.getElementById('maint-date');
+const maintSexIna = document.getElementById('maint-sex-ina');
+const maintSexFemale = document.getElementById('maint-sex-female');
+const maintSexMale = document.getElementById('maint-sex-male');
+const maintFieldsIU = document.getElementById('maint-fields-iu');
+const maintWarnDelete = document.getElementById('maint-warn-delete');
+const btnMaintSubmit = document.getElementById('btn-maint-submit');
+
 const btnBack = document.getElementById('btn-back');
 const jobMeta = document.getElementById('job-meta');
 const errorBox = document.getElementById('error-box');
 const reportEl = document.getElementById('report');
 
-function showResults() {
-  searchView.style.display = 'none';
-  resultsView.style.display = 'block';
+// Vue a laquelle revenir depuis les resultats ('search' ou 'maintain').
+let lastView = 'search';
+
+function setVisible(el, visible) {
+  el.classList.toggle('visible', visible);
 }
-function showSearch() {
-  resultsView.style.display = 'none';
-  searchView.style.display = 'block';
+
+function showSearchTab() {
+  lastView = 'search';
+  setVisible(searchView, true);
+  setVisible(maintainView, false);
+  setVisible(resultsView, false);
+  tabSearch.classList.add('active');
+  tabMaintain.classList.remove('active');
   input.focus();
 }
 
-btnBack.addEventListener('click', showSearch);
+function showMaintainTab() {
+  lastView = 'maintain';
+  setVisible(searchView, false);
+  setVisible(maintainView, true);
+  setVisible(resultsView, false);
+  tabSearch.classList.remove('active');
+  tabMaintain.classList.add('active');
+  maintRecordId.focus();
+}
+
+function showResults() {
+  setVisible(searchView, false);
+  setVisible(maintainView, false);
+  setVisible(resultsView, true);
+}
+
+function showLastForm() {
+  if (lastView === 'maintain') {
+    showMaintainTab();
+  } else {
+    showSearchTab();
+  }
+}
+
+tabSearch.addEventListener('click', showSearchTab);
+tabMaintain.addEventListener('click', showMaintainTab);
+btnBack.addEventListener('click', showLastForm);
+
+function updateMaintainFieldsVisibility() {
+  const isDelete = maintFunction.value === 'D';
+  maintFieldsIU.style.display = isDelete ? 'none' : 'block';
+  maintWarnDelete.style.display = isDelete ? 'block' : 'none';
+}
+maintFunction.addEventListener('change', updateMaintainFieldsVisibility);
+updateMaintainFieldsVisibility();
+
+function displayApiResult(data, ok, fallbackButton) {
+  if (!ok) {
+    errorBox.style.display = 'block';
+    let msg = data.error || 'Erreur inconnue';
+    if (data.detail) msg += ' - ' + data.detail;
+    errorBox.textContent = msg;
+
+    const debugLines = [];
+    if (data.jobid) debugLines.push('jobid: ' + data.jobid);
+    if (data.jobStatus) debugLines.push('statut job: ' + data.jobStatus);
+    if (data.retcode) debugLines.push('retcode: ' + data.retcode);
+    if (data.availableDDs) {
+      debugLines.push('DD disponibles dans le spool: ' + data.availableDDs.join(', '));
+    }
+    jobMeta.textContent = debugLines.join('  |  ');
+    reportEl.textContent = '';
+    showResults();
+    return;
+  }
+
+  errorBox.style.display = 'none';
+  const statusClass = (data.retcode === 'CC 0000' || data.retcode === 'CC 0004')
+    ? 'status-ok' : 'status-warn';
+  jobMeta.innerHTML =
+    'Job ' + data.jobname + ' (' + data.jobid + ') - statut ' +
+    data.status + ' - <span class="' + statusClass + '">' +
+    data.retcode + '</span>';
+  reportEl.textContent = data.report;
+  showResults();
+}
 
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') btnSubmit.click();
@@ -181,6 +364,7 @@ btnSubmit.addEventListener('click', async () => {
   const recordId = input.value.trim();
   if (!recordId) return;
 
+  lastView = 'search';
   btnSubmit.disabled = true;
   btnSubmit.textContent = 'Soumission du job...';
   errorBox.style.display = 'none';
@@ -194,35 +378,7 @@ btnSubmit.addEventListener('click', async () => {
       body: JSON.stringify({ recordId })
     });
     const data = await resp.json();
-
-    if (!resp.ok) {
-      errorBox.style.display = 'block';
-      let msg = data.error || 'Erreur inconnue';
-      if (data.detail) msg += ' - ' + data.detail;
-      errorBox.textContent = msg;
-
-      const debugLines = [];
-      if (data.jobid) debugLines.push('jobid: ' + data.jobid);
-      if (data.jobStatus) debugLines.push('statut job: ' + data.jobStatus);
-      if (data.retcode) debugLines.push('retcode: ' + data.retcode);
-      if (data.availableDDs) {
-        debugLines.push('DD disponibles dans le spool: ' +
-          data.availableDDs.join(', '));
-      }
-      jobMeta.textContent = debugLines.join('  |  ');
-      reportEl.textContent = '';
-      showResults();
-      return;
-    }
-
-    const statusClass = (data.retcode === 'CC 0000' || data.retcode === 'CC 0004')
-      ? 'status-ok' : 'status-warn';
-    jobMeta.innerHTML =
-      'Job ' + data.jobname + ' (' + data.jobid + ') - statut ' +
-      data.status + ' - <span class="' + statusClass + '">' +
-      data.retcode + '</span>';
-    reportEl.textContent = data.report;
-    showResults();
+    displayApiResult(data, resp.ok);
   } catch (err) {
     errorBox.style.display = 'block';
     errorBox.textContent = 'Erreur reseau : ' + err.message;
@@ -230,6 +386,46 @@ btnSubmit.addEventListener('click', async () => {
   } finally {
     btnSubmit.disabled = false;
     btnSubmit.textContent = 'Rechercher';
+  }
+});
+
+btnMaintSubmit.addEventListener('click', async () => {
+  const recordId = maintRecordId.value.trim();
+  if (!recordId) return;
+
+  const payload = {
+    function: maintFunction.value,
+    recordId
+  };
+  if (maintFunction.value !== 'D') {
+    payload.date = maintDate.value.trim();
+    payload.sexIna = maintSexIna.value.trim();
+    payload.sexFemale = maintSexFemale.value.trim();
+    payload.sexMale = maintSexMale.value.trim();
+  }
+
+  lastView = 'maintain';
+  btnMaintSubmit.disabled = true;
+  btnMaintSubmit.textContent = 'Soumission du job...';
+  errorBox.style.display = 'none';
+  reportEl.textContent = '';
+  jobMeta.textContent = '';
+
+  try {
+    const resp = await fetch('/api/maintain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    displayApiResult(data, resp.ok);
+  } catch (err) {
+    errorBox.style.display = 'block';
+    errorBox.textContent = 'Erreur reseau : ' + err.message;
+    showResults();
+  } finally {
+    btnMaintSubmit.disabled = false;
+    btnMaintSubmit.textContent = 'Executer';
   }
 });
 </script>

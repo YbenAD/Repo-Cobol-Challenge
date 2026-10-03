@@ -36,13 +36,13 @@ jobs:
       - name: Verifier la syntaxe de chaque programme
         run: |
           set -e
-          for f in cobol/CLMLOAD.cbl cobol/CLMREAD.cbl cobol/CLMRPT.cbl; do
+          for f in cobol/CLMLOAD.cbl cobol/CLMREAD.cbl cobol/CLMRPT.cbl cobol/CLMMAINT.cbl; do
             echo "::group::Syntax-only $f"
             cobc -std=ibm -fsyntax-only -Icopybooks "$f"
             echo "::endgroup::"
           done
 
-      - name: Compiler et lier (CLMLOAD seul, CLMRPT+CLMREAD ensemble)
+      - name: Compiler et lier (CLMLOAD seul, CLMRPT/CLMMAINT+CLMREAD)
         run: |
           set -e
           mkdir -p build
@@ -57,7 +57,10 @@ jobs:
           echo "::group::cobc -x CLMRPT.cbl CLMREAD.cbl"
           cobc -std=ibm -x CLMRPT.cbl CLMREAD.cbl
           echo "::endgroup::"
-          ls -la CLMLOAD CLMRPT CLMREAD.so
+          echo "::group::cobc -x CLMMAINT.cbl CLMREAD.cbl"
+          cobc -std=ibm -x CLMMAINT.cbl CLMREAD.cbl
+          echo "::endgroup::"
+          ls -la CLMLOAD CLMRPT CLMMAINT CLMREAD.so
 
       - name: Publier les binaires compiles (pour inspection)
         uses: actions/upload-artifact@v4
@@ -66,6 +69,7 @@ jobs:
           path: |
             build/CLMLOAD
             build/CLMRPT
+            build/CLMMAINT
             build/CLMREAD.so
           retention-days: 7
 
@@ -137,9 +141,10 @@ jobs:
       - name: Verifier la syntaxe de server.js
         run: node --check server.js
 
-      - name: Verifier que le gabarit JCL contient bien le marqueur {{REQUEST}}
+      - name: Verifier que les gabarits JCL contiennent bien le marqueur {{REQUEST}}
         run: |
           grep -q '{{REQUEST}}' jcl/RUNRPT.template.jcl
+          grep -q '{{REQUEST}}' jcl/RUNMAINT.template.jcl
 
   # ---------------------------------------------------------------------
   # 4) Recapitulatif : ce job ne fait rien de plus, il sert juste a avoir
